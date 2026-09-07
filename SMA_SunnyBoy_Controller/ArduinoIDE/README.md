@@ -23,9 +23,12 @@ Open in de Arduino IDE via **File → Open...** en wijs naar
 Via **Sketch → Include Library → Manage Libraries**, zoek en installeer:
 
 - **WiFiManager** (door tzapu)
-- **ArduinoModbus** (door Arduino) — installeert automatisch ook
-  **ArduinoRS485** als afhankelijkheid
 - **LiquidCrystal_I2C** (door Frank de Brabander / John Rickman)
+
+Modbus TCP zelf heeft geen aparte library nodig — de officiële
+`ArduinoModbus`/`ArduinoRS485` ondersteunen alleen SAMD/megaAVR/mbed-
+boards en compileren niet voor ESP32, dus dat protocol zit direct in
+de sketch zelf (bovenop `WiFiClient`).
 
 Daarna gewoon **Verify/Compile** en **Upload**. Verdere werking en
 bedrading: zie de hoofd-`README.md` een map hoger.

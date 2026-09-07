@@ -18,7 +18,6 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
-#include <ArduinoModbus.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
@@ -82,7 +81,6 @@ uint32_t parseU32(const char *val, uint32_t fallback) {
 // ---------------- Globals ----------------
 LiquidCrystal_I2C lcd(LCD_ADDR, 20, 4);
 WiFiClient wifiClient;
-ModbusTCPClient modbus(wifiClient);
 WebServer server(80);
 
 unsigned long lastReadMs       = 0;
@@ -98,7 +96,20 @@ bool     haveEnergy        = false;
 uint8_t  lastSentPercent   = 255; // 255 = never sent yet
 uint8_t  currentPotPercent = 0;
 
-// ---------------- Modbus helpers ----------------
+// ---------------- Modbus TCP (hand-rolled, WiFiClient only) ----------------
+// The official ArduinoModbus/ArduinoRS485 libraries only target
+// SAMD/megaAVR/mbed boards and fail to build for ESP32 (ArduinoRS485
+// references SERIAL_PORT_HARDWARE, which the ESP32 core doesn't
+// define). Talking raw Modbus TCP over a plain WiFiClient sidesteps
+// that entirely - it's just an MBAP header (transaction/protocol
+// id, length, unit id) wrapped around a small PDU.
+static const uint8_t MODBUS_FC_READ_INPUT_REGISTERS = 0x04;
+static const uint8_t MODBUS_FC_WRITE_SINGLE_REGISTER = 0x06;
+static const size_t  MODBUS_PAYLOAD_MAX = 32;
+static const unsigned long MODBUS_TIMEOUT_MS = 2000;
+
+uint16_t modbusTransactionId = 0;
+
 bool ensureModbus() {
   if (WiFi.status() != WL_CONNECTED) {
     modbusConnected = false;
@@ -112,44 +123,100 @@ bool ensureModbus() {
     Serial.println(F("Modbus: invalid inverter IP configured"));
     return false;
   }
-  modbusConnected = modbus.begin(ip, settings.smaPort);
+  wifiClient.stop();
+  modbusConnected = wifiClient.connect(ip, settings.smaPort);
   if (!modbusConnected) {
     Serial.println(F("Modbus: connect failed"));
   }
   return modbusConnected;
 }
 
-bool readS32InputRegister(uint32_t address, int32_t &result) {
-  if (!modbus.requestFrom(settings.smaUnitId, INPUT_REGISTERS, address, 2)) {
+bool modbusReadExact(uint8_t *buf, size_t len) {
+  size_t got = 0;
+  unsigned long start = millis();
+  while (got < len && millis() - start < MODBUS_TIMEOUT_MS) {
+    if (wifiClient.available()) {
+      int n = wifiClient.read(buf + got, len - got);
+      if (n > 0) got += (size_t)n;
+    } else {
+      delay(1);
+    }
+  }
+  return got == len;
+}
+
+// Sends one Modbus TCP request (address = register address,
+// qtyOrValue = register count for reads / value for single-register
+// writes) and returns the response PDU payload (after byte count for
+// reads / the echoed bytes for a write).
+bool modbusTransceive(uint8_t functionCode, uint16_t address, uint16_t qtyOrValue,
+                       uint8_t *responsePayload, size_t &responsePayloadLen) {
+  if (!wifiClient.connected()) return false;
+
+  modbusTransactionId++;
+  uint8_t frame[12] = {
+    (uint8_t)(modbusTransactionId >> 8), (uint8_t)(modbusTransactionId & 0xFF),
+    0x00, 0x00, // protocol id
+    0x00, 0x06, // length: unit id + function code + 2 params
+    settings.smaUnitId,
+    functionCode,
+    (uint8_t)(address >> 8), (uint8_t)(address & 0xFF),
+    (uint8_t)(qtyOrValue >> 8), (uint8_t)(qtyOrValue & 0xFF)
+  };
+  wifiClient.write(frame, sizeof(frame));
+
+  uint8_t header[8]; // MBAP (7 bytes) + response function code
+  if (!modbusReadExact(header, sizeof(header))) return false;
+
+  uint16_t respLen = ((uint16_t)header[4] << 8) | header[5];
+  uint8_t respFunctionCode = header[7];
+  if (respLen < 2) return false;
+
+  size_t payloadLen = respLen - 2; // minus unit id + function code, already read
+  if (payloadLen > MODBUS_PAYLOAD_MAX) return false;
+  if (!modbusReadExact(responsePayload, payloadLen)) return false;
+
+  if (respFunctionCode & 0x80) return false; // Modbus exception response
+  responsePayloadLen = payloadLen;
+  return true;
+}
+
+bool modbusReadRegisters(uint8_t functionCode, uint16_t address, uint16_t count, uint16_t *outWords) {
+  uint8_t payload[MODBUS_PAYLOAD_MAX];
+  size_t payloadLen = 0;
+  if (!modbusTransceive(functionCode, address, count, payload, payloadLen)) {
     modbusConnected = false;
     return false;
   }
-  uint32_t hi = (uint16_t)modbus.read();
-  uint32_t lo = (uint16_t)modbus.read();
-  result = (int32_t)((hi << 16) | lo);
+  if (payloadLen < 1 || payload[0] != count * 2) return false;
+  for (uint16_t i = 0; i < count; i++) {
+    outWords[i] = ((uint16_t)payload[1 + i * 2] << 8) | payload[2 + i * 2];
+  }
+  return true;
+}
+
+bool readS32InputRegister(uint32_t address, int32_t &result) {
+  uint16_t words[2];
+  if (!modbusReadRegisters(MODBUS_FC_READ_INPUT_REGISTERS, (uint16_t)address, 2, words)) return false;
+  result = (int32_t)(((uint32_t)words[0] << 16) | words[1]);
   return true;
 }
 
 bool readU64InputRegister(uint32_t address, uint64_t &result) {
-  if (!modbus.requestFrom(settings.smaUnitId, INPUT_REGISTERS, address, 4)) {
-    modbusConnected = false;
-    return false;
-  }
+  uint16_t words[4];
+  if (!modbusReadRegisters(MODBUS_FC_READ_INPUT_REGISTERS, (uint16_t)address, 4, words)) return false;
   uint64_t value = 0;
   for (uint8_t i = 0; i < 4; i++) {
-    value = (value << 16) | (uint16_t)modbus.read();
+    value = (value << 16) | words[i];
   }
   result = value;
   return true;
 }
 
 bool writeInt16HoldingRegister(uint32_t address, int16_t value) {
-  if (!modbus.beginTransmission(settings.smaUnitId, HOLDING_REGISTERS, address, 1)) {
-    modbusConnected = false;
-    return false;
-  }
-  modbus.write((uint16_t)value);
-  if (!modbus.endTransmission()) {
+  uint8_t payload[MODBUS_PAYLOAD_MAX];
+  size_t payloadLen = 0;
+  if (!modbusTransceive(MODBUS_FC_WRITE_SINGLE_REGISTER, (uint16_t)address, (uint16_t)value, payload, payloadLen)) {
     modbusConnected = false;
     return false;
   }
