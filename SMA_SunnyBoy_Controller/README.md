@@ -20,9 +20,16 @@ are stored in flash (NVS) so they survive reboots and reflashes.
   stays blank, try `0x3F` (the other common backpack address) in
   `LCD_ADDR`.
 
+Using the Arduino IDE instead of PlatformIO? Use
+`ArduinoIDE/SMA_SunnyBoy_Controller/SMA_SunnyBoy_Controller.ino`
+instead of `src/main.cpp` — see `ArduinoIDE/README.md` for the board
+and library setup.
+
 ## First-time setup (per customer, no reflashing)
 
-1. Flash the firmware once: `pio run -t upload` from this directory.
+1. Flash the firmware once: `pio run -t upload` from this directory
+   (PlatformIO), or Verify + Upload the `.ino` sketch from the
+   `ArduinoIDE/` folder.
 2. Power it on. With no WiFi configured yet it starts a setup access
    point — the LCD shows the network name and password directly:
    `SMA-Setup-xxxxxx` / `smasetup`.
