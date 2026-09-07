@@ -16,24 +16,28 @@
 
 #include "config.h"
 
-static const unsigned long READ_INTERVAL_MS       = 5000;
-static const unsigned long WRITE_MIN_INTERVAL_MS   = 2000;
-static const unsigned long WIFI_RETRY_INTERVAL_MS  = 5000;
-static const uint8_t       POT_DEADBAND_PERCENT    = 2;
-static const uint8_t       POT_SAMPLES             = 16; // averaged per reading
+static const unsigned long READ_INTERVAL_MS        = 5000;
+static const unsigned long ENERGY_READ_INTERVAL_MS = 60000;
+static const unsigned long WRITE_MIN_INTERVAL_MS    = 2000;
+static const unsigned long WIFI_RETRY_INTERVAL_MS   = 5000;
+static const uint8_t       POT_DEADBAND_PERCENT     = 2;
+static const uint8_t       POT_SAMPLES              = 16; // averaged per reading
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 WiFiClient wifiClient;
 ModbusTCPClient modbus(wifiClient);
 
-unsigned long lastReadMs  = 0;
-unsigned long lastWriteMs = 0;
+unsigned long lastReadMs   = 0;
+unsigned long lastEnergyReadMs = 0;
+unsigned long lastWriteMs  = 0;
 unsigned long lastWifiTryMs = 0;
 
-bool    modbusConnected = false;
-int32_t lastAcPowerW    = 0;
-bool    haveAcPower      = false;
-uint8_t lastSentPercent  = 255; // 255 = never sent yet
+bool     modbusConnected  = false;
+int32_t  lastAcPowerW     = 0;
+bool     haveAcPower       = false;
+uint64_t lastEnergyWh      = 0;
+bool     haveEnergy        = false;
+uint8_t  lastSentPercent   = 255; // 255 = never sent yet
 
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
@@ -78,13 +82,29 @@ bool readS32InputRegister(int address, int32_t &result) {
   return true;
 }
 
-bool writeS32HoldingRegister(int address, int32_t value) {
-  if (!modbus.beginTransmission(SMA_UNIT_ID, HOLDING_REGISTERS, address, 2)) {
+// Reads a U64 (4 registers, big-endian) input register.
+bool readU64InputRegister(int address, uint64_t &result) {
+  if (!modbus.requestFrom(SMA_UNIT_ID, INPUT_REGISTERS, address, 4)) {
+    Serial.print(F("Modbus: read failed @"));
+    Serial.println(address);
     modbusConnected = false;
     return false;
   }
-  modbus.write((uint16_t)((uint32_t)value >> 16));
-  modbus.write((uint16_t)((uint32_t)value & 0xFFFF));
+  uint64_t value = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    value = (value << 16) | (uint16_t)modbus.read();
+  }
+  result = value;
+  return true;
+}
+
+// Writes a single 16-bit holding register.
+bool writeInt16HoldingRegister(int address, int16_t value) {
+  if (!modbus.beginTransmission(SMA_UNIT_ID, HOLDING_REGISTERS, address, 1)) {
+    modbusConnected = false;
+    return false;
+  }
+  modbus.write((uint16_t)value);
   if (!modbus.endTransmission()) {
     Serial.print(F("Modbus: write failed @"));
     Serial.println(address);
@@ -119,7 +139,7 @@ void updateDisplay(uint8_t potPercent) {
   display.println(modbusConnected ? F("OK") : F("..."));
 
   display.setCursor(0, 24);
-  display.print(F("AC power: "));
+  display.print(F("Power: "));
   if (haveAcPower) {
     display.print(lastAcPowerW);
     display.println(F(" W"));
@@ -127,10 +147,14 @@ void updateDisplay(uint8_t potPercent) {
     display.println(F("--"));
   }
 
-  display.setCursor(0, 38);
-  display.print(F("Limit set: "));
-  display.print(potPercent);
-  display.println(F(" %"));
+  display.setCursor(0, 34);
+  display.print(F("Total: "));
+  if (haveEnergy) {
+    display.print(lastEnergyWh / 1000.0, 1);
+    display.println(F(" kWh"));
+  } else {
+    display.println(F("--"));
+  }
 
   display.setTextSize(2);
   display.setCursor(0, 48);
@@ -174,6 +198,11 @@ void loop() {
       haveAcPower = readS32InputRegister(REG_AC_POWER, lastAcPowerW);
     }
 
+    if (now - lastEnergyReadMs >= ENERGY_READ_INTERVAL_MS) {
+      lastEnergyReadMs = now;
+      haveEnergy = readU64InputRegister(REG_ENERGY_TOTAL, lastEnergyWh);
+    }
+
 #if WRITE_ENABLED
     bool changedEnough =
       lastSentPercent == 255 ||
@@ -181,7 +210,8 @@ void loop() {
 
     if (changedEnough && millis() - lastWriteMs >= WRITE_MIN_INTERVAL_MS) {
       lastWriteMs = millis();
-      if (writeS32HoldingRegister(REG_POWER_LIMIT, (int32_t)potPercent)) {
+      int16_t raw = (int16_t)((int32_t)potPercent * REG_POWER_LIMIT_SCALE);
+      if (writeInt16HoldingRegister(REG_POWER_LIMIT, raw)) {
         lastSentPercent = potPercent;
         Serial.print(F("Modbus: power limit set to "));
         Serial.print(potPercent);

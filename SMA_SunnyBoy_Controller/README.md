@@ -23,26 +23,28 @@ OLED display.
 3. Build/flash with PlatformIO: `pio run -t upload` (from this
    directory), `pio device monitor` for logs.
 
-## Verify your registers before writing anything
+## Registers
 
-`REG_AC_POWER` (30775, `GridMs.TotW`) is a standard SMA Modbus
-register used for reading total AC power on virtually all SMA grid
-inverters — safe to use as shipped.
+| Register | Address | Type | Meaning |
+|---|---|---|---|
+| `REG_AC_POWER` | 30775 | input, S32 | `GridMs.TotW` — total AC power (W), standard on virtually all SMA grid inverters |
+| `REG_ENERGY_TOTAL` | 30513 | input, U64 | `Metering.TotWhOut` — lifetime energy fed in (Wh) |
+| `REG_POWER_LIMIT` | 41255 | holding, int16, scale 0.01 | Active power limit setpoint in % (raw 5000 = 50.00%) |
 
-`REG_POWER_LIMIT`, the register that actually sets the active power
-limit / curtailment setpoint, is **not** filled in by default. Its
-address, scaling, and whether it needs a Grid Guard / installer login
-differ by inverter model and firmware. Look it up in SMA's "Modbus
-parameters and measured values" list for your exact device, fill in
-`REG_POWER_LIMIT` in `config.h`, and only then set `WRITE_ENABLED 1`.
-Until you do, the firmware runs read-only: the potmeter position is
-shown on the display but nothing is sent to the inverter.
+`REG_AC_POWER` and `REG_ENERGY_TOTAL` are safe to read as shipped.
+`REG_POWER_LIMIT` still varies by inverter model/firmware, and some
+models need a Grid Guard / installer login before they'll accept
+writes to it — double check against your own inverter before flipping
+`WRITE_ENABLED` to `1`. Until then the firmware runs read-only: the
+potmeter position is shown on the display but nothing is sent to the
+inverter.
 
 ## Behavior
 
-- Reads `REG_AC_POWER` every 5 seconds.
+- Reads `REG_AC_POWER` every 5 seconds and `REG_ENERGY_TOTAL` every 60.
 - Samples the potmeter continuously (averaged over 16 ADC reads).
 - With `WRITE_ENABLED 1`: writes the setpoint to `REG_POWER_LIMIT`
-  whenever it moves by more than 2%, at most once every 2 seconds.
+  (scaled by `REG_POWER_LIMIT_SCALE`) whenever it moves by more than
+  2%, at most once every 2 seconds.
 - OLED shows WiFi status, Modbus connection status, measured AC
-  power, and the current setpoint.
+  power, lifetime energy, and the current setpoint.

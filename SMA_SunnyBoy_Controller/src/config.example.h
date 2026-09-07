@@ -23,18 +23,22 @@
 #define REG_AC_POWER_COUNT 2
 
 // REG_POWER_LIMIT: holding register for the active power limit /
-// curtailment setpoint. The exact address, scaling and whether it
-// requires a Grid Guard / installer login DIFFERS per SMA device
-// family and firmware version. 0 is a placeholder - look yours up in
-// "SMA Modbus parameters and measured values" for your exact model
-// before touching WRITE_ENABLED.
-#define REG_POWER_LIMIT       0
-#define REG_POWER_LIMIT_COUNT 2
+// curtailment setpoint, as reported for this inverter: single int16
+// (some models use uint16, doesn't matter here since values stay
+// 0-10000, positive) register, scale 0.01 -> raw 5000 means 50.00%.
+// Still verify against your own inverter before flipping WRITE_ENABLED;
+// the address/scale can differ on other SMA models/firmware.
+#define REG_POWER_LIMIT       41255
+#define REG_POWER_LIMIT_SCALE 100   // raw register value = percent * 100
 
-// Stays 0 (read-only mode) until you have verified REG_POWER_LIMIT
-// against your own inverter's documentation. With this at 0 the
-// potmeter position is only shown on the display, nothing is written.
+// Stays 0 (read-only mode) until you're sure REG_POWER_LIMIT is right
+// for your inverter. With this at 0 the potmeter position is only
+// shown on the display, nothing is written.
 #define WRITE_ENABLED 0
+
+// REG_ENERGY_TOTAL: "Metering.TotWhOut", total lifetime AC energy fed
+// in. Input register, U64 (4 registers, big-endian), unit Wh.
+#define REG_ENERGY_TOTAL 30513
 
 // ---------------- Hardware pins ----------------
 #define POT_PIN     34   // ADC1 input-only pin, safe to read with WiFi active
