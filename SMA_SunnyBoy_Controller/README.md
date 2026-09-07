@@ -4,40 +4,47 @@ Standalone ESP32 project (not an ESPEasy plugin — this repo's ESPEasy
 checkout predates ESP32 support entirely). Reads the current AC power
 and lifetime energy from an SMA Sunny Boy inverter over Modbus TCP,
 and lets you set an active-power-limit setpoint with a potentiometer,
-shown on a small OLED display.
+shown on a 20x4 I2C LCD.
 
 **One firmware image works for every install** — nothing is baked in
 at compile time. WiFi and all SMA settings are configured after
-flashing, through the device's own web pages, and are stored in flash
-(NVS) so they survive reboots and reflashes.
+flashing, through the device's own setup portal and web pages, and
+are stored in flash (NVS) so they survive reboots and reflashes.
 
 ## Hardware
 
 - ESP32 dev board
 - Potentiometer: outer legs to 3V3 and GND, wiper to GPIO34 (`POT_PIN`)
-- SSD1306 128x64 I2C OLED: SDA to GPIO21, SCL to GPIO22 (`OLED_SDA`/`OLED_SCL`)
+- 2004 I2C LCD (PCF8574 backpack): SDA to GPIO21, SCL to GPIO22
+  (`LCD_SDA`/`LCD_SCL`). Default I2C address `0x27` — if the display
+  stays blank, try `0x3F` (the other common backpack address) in
+  `LCD_ADDR`.
 
 ## First-time setup (per customer, no reflashing)
 
 1. Flash the firmware once: `pio run -t upload` from this directory.
 2. Power it on. With no WiFi configured yet it starts a setup access
-   point — the OLED shows the network name and password directly:
+   point — the LCD shows the network name and password directly:
    `SMA-Setup-xxxxxx` / `smasetup`.
 3. Connect a phone or laptop to that network. A configuration page
    should open automatically (captive portal); if not, browse to
    `http://192.168.4.1`.
-4. Pick the customer's WiFi network, enter its password, and fill in
-   the SMA inverter's IP address, then save. The device reboots and
+4. Pick the customer's WiFi network, enter its password, and on the
+   same page fill in the SMA inverter's IP address, Modbus port, unit
+   ID and the three registers (AC power, energy total, power limit) —
+   all pre-filled with sensible defaults, only the IP really needs to
+   change for a typical install. Save, and the device reboots and
    joins that network.
 5. Open `http://<device-ip>/` (also reachable via
    `http://sma-ctrl-xxxx.local/` on networks that support mDNS) and go
-   to **Instellingen** to fine-tune the Modbus port/unit ID, registers
-   and the write-enable switch. Default login: `admin` / `sma1234`.
+   to **Instellingen** if you still need to adjust the register scale
+   or turn on writing. Default login: `admin` / `sma1234`.
 
-To reconfigure WiFi later (e.g. moving the device to a different
-customer): hold the BOOT button for 3 seconds at power-up, or use the
-**WiFi vergeten** button on the settings page — both wipe the stored
-WiFi credentials and reopen the setup portal.
+To reconfigure WiFi and all SMA settings later (e.g. moving the device
+to a different customer): hold the BOOT button for 3 seconds at
+power-up, or use the **WiFi vergeten** button on the settings page —
+both wipe the stored WiFi credentials and reopen the setup portal with
+the fields above.
 
 ## Registers
 
@@ -47,9 +54,10 @@ WiFi credentials and reopen the setup portal.
 | Energy total register | 30513 | input, U64 | `Metering.TotWhOut` — lifetime energy fed in (Wh) |
 | Power limit register | 41255 | holding, int16, scale 0.01 | Active power limit setpoint in % (raw 5000 = 50.00%) |
 
-All of these are editable per device on the **Instellingen** page —
-no firmware changes needed if a particular inverter model/firmware
-uses different addresses.
+IP, port, unit ID and all three registers are editable right in the
+setup portal; the register scale and write-enable switch are on the
+**Instellingen** web page. No firmware changes needed if a particular
+inverter model/firmware uses different addresses.
 
 The AC power and energy registers are safe to read as shipped. The
 power limit register still varies by inverter model/firmware, and
@@ -67,7 +75,7 @@ shown on the display but nothing is sent to the inverter.
 - With writing enabled: writes the setpoint to the power limit
   register (scaled by the configured scale factor) whenever it moves
   by more than 2%, at most once every 2 seconds.
-- OLED shows WiFi/Modbus status, device IP, measured AC power,
-  lifetime energy, and the current setpoint.
-- Web UI (`/`) shows the same status remotely; `/config` edits all
-  SMA settings.
+- LCD shows WiFi/Modbus status, device IP, measured AC power, lifetime
+  energy, and the current setpoint.
+- Web UI (`/`) shows the same status remotely; `/config` edits the
+  remaining SMA settings.

@@ -2,15 +2,16 @@
 //
 // One firmware image for every install - no per-customer recompiling:
 // - First boot (or after a WiFi reset) opens a WiFiManager captive
-//   portal so the installer/customer connects with a phone and picks
-//   their own WiFi network + enters the inverter's IP.
-// - Once online, all SMA settings (port, unit id, registers, scale,
-//   write-enable) are edited from a normal web page at /config.
+//   portal so the installer/customer connects with a phone, picks
+//   their own WiFi network, and fills in the inverter's IP/port/unit
+//   ID and Modbus registers right there.
+// - Anything not filled in during setup (write-enable, register
+//   scale) can still be changed later from a web page at /config.
 // - Settings persist in flash (NVS) across reboots and firmware
 //   updates.
 //
 // Hardware: potentiometer on POT_PIN sets a 0-100% active power limit
-// setpoint, shown together with live readings on an SSD1306 OLED.
+// setpoint, shown together with live readings on a 20x4 I2C LCD.
 
 #include <WiFi.h>
 #include <WiFiManager.h>
@@ -19,17 +20,16 @@
 #include <Preferences.h>
 #include <ArduinoModbus.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>
 
 // ---------------- Fixed hardware pins ----------------
-static const int POT_PIN   = 34; // ADC1 input-only pin, safe to read with WiFi active
-static const int OLED_SDA  = 21;
-static const int OLED_SCL  = 22;
-static const uint8_t OLED_ADDR = 0x3C;
+static const int POT_PIN = 34; // ADC1 input-only pin, safe to read with WiFi active
+static const int LCD_SDA = 21;
+static const int LCD_SCL = 22;
+static const uint8_t LCD_ADDR = 0x27; // common PCF8574 backpack address; try 0x3F if the display stays blank
 static const int WIFI_RESET_BUTTON_PIN = 0; // BOOT button on most ESP32 dev boards
 
-static const char *AP_PASSWORD = "smasetup"; // shown on the OLED while in setup mode
+static const char *AP_PASSWORD = "smasetup"; // shown on the LCD while in setup mode
 
 // ---------------- Timing ----------------
 static const unsigned long READ_INTERVAL_MS        = 5000;
@@ -73,8 +73,14 @@ void saveSettings() {
   prefs.end();
 }
 
+// Parses a decimal string; keeps `fallback` if the string is empty/null.
+uint32_t parseU32(const char *val, uint32_t fallback) {
+  if (val == nullptr || val[0] == '\0') return fallback;
+  return (uint32_t)strtoul(val, nullptr, 10);
+}
+
 // ---------------- Globals ----------------
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
+LiquidCrystal_I2C lcd(LCD_ADDR, 20, 4);
 WiFiClient wifiClient;
 ModbusTCPClient modbus(wifiClient);
 WebServer server(80);
@@ -161,69 +167,47 @@ uint8_t readPotPercent() {
   return (uint8_t)constrain((avg * 100UL) / 4095UL, 0UL, 100UL);
 }
 
-// ---------------- Display ----------------
+// ---------------- Display (20x4 I2C LCD) ----------------
+void lcdLine(uint8_t row, String text) {
+  if (text.length() > 20) {
+    text = text.substring(0, 20);
+  }
+  while (text.length() < 20) {
+    text += ' ';
+  }
+  lcd.setCursor(0, row);
+  lcd.print(text);
+}
+
 void showSetupScreen(const String &apName) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println(F("Setup mode - connect to:"));
-  display.setCursor(0, 12);
-  display.println(apName);
-  display.setCursor(0, 24);
-  display.print(F("Wachtwoord: "));
-  display.println(AP_PASSWORD);
-  display.setCursor(0, 40);
-  display.println(F("Open in browser:"));
-  display.setCursor(0, 52);
-  display.println(F("http://192.168.4.1"));
-  display.display();
+  lcdLine(0, F("Setup mode - verbind:"));
+  lcdLine(1, apName);
+  lcdLine(2, String(F("Wachtwoord: ")) + AP_PASSWORD);
+  lcdLine(3, F("http://192.168.4.1"));
 }
 
 void updateDisplay() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  String line0 = F("WiFi:");
+  line0 += (WiFi.status() == WL_CONNECTED) ? F("OK") : F("..");
+  line0 += F(" MB:");
+  line0 += modbusConnected ? F("OK") : F("..");
+  lcdLine(0, line0);
 
-  display.setCursor(0, 0);
-  display.print(F("WiFi: "));
-  display.print(WiFi.status() == WL_CONNECTED ? F("OK  ") : F("... "));
-  display.print(F("MB: "));
-  display.println(modbusConnected ? F("OK") : F("..."));
+  lcdLine(1, (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String(F("niet verbonden")));
 
-  display.setCursor(0, 12);
-  display.print(WiFi.localIP());
+  String line2 = F("P:");
+  line2 += haveAcPower ? (String(lastAcPowerW) + F("W")) : String(F("--"));
+  line2 += F(" E:");
+  line2 += haveEnergy ? (String(lastEnergyWh / 1000.0, 1) + F("kWh")) : String(F("--"));
+  lcdLine(2, line2);
 
-  display.setCursor(0, 26);
-  display.print(F("Power: "));
-  if (haveAcPower) {
-    display.print(lastAcPowerW);
-    display.println(F(" W"));
-  } else {
-    display.println(F("--"));
-  }
-
-  display.setCursor(0, 36);
-  display.print(F("Total: "));
-  if (haveEnergy) {
-    display.print(lastEnergyWh / 1000.0, 1);
-    display.println(F(" kWh"));
-  } else {
-    display.println(F("--"));
-  }
-
-  display.setTextSize(2);
-  display.setCursor(0, 48);
-  display.print(currentPotPercent);
-  display.println(F("%"));
-
+  String line3 = F("Limiet: ");
+  line3 += currentPotPercent;
+  line3 += F("%");
   if (!settings.writeEnabled) {
-    display.setTextSize(1);
-    display.setCursor(70, 48);
-    display.print(F("(read-only)"));
+    line3 += F(" (RO)");
   }
-
-  display.display();
+  lcdLine(3, line3);
 }
 
 // ---------------- Web config UI ----------------
@@ -360,8 +344,30 @@ void runCaptivePortal() {
 
   char ipBuf[16];
   strncpy(ipBuf, settings.smaIp, sizeof(ipBuf));
+  char portBuf[6];
+  snprintf(portBuf, sizeof(portBuf), "%u", settings.smaPort);
+  char unitBuf[4];
+  snprintf(unitBuf, sizeof(unitBuf), "%u", settings.smaUnitId);
+  char regAcBuf[8];
+  snprintf(regAcBuf, sizeof(regAcBuf), "%lu", (unsigned long)settings.regAcPower);
+  char regEnergyBuf[8];
+  snprintf(regEnergyBuf, sizeof(regEnergyBuf), "%lu", (unsigned long)settings.regEnergyTotal);
+  char regLimitBuf[8];
+  snprintf(regLimitBuf, sizeof(regLimitBuf), "%lu", (unsigned long)settings.regPowerLimit);
+
   WiFiManagerParameter customSmaIp("sma_ip", "IP-adres van de SMA omvormer", ipBuf, sizeof(ipBuf));
+  WiFiManagerParameter customPort("sma_port", "Modbus TCP poort", portBuf, sizeof(portBuf), "type='number'");
+  WiFiManagerParameter customUnit("sma_unit", "Modbus unit ID", unitBuf, sizeof(unitBuf), "type='number'");
+  WiFiManagerParameter customRegAc("reg_ac", "Register AC-vermogen (input)", regAcBuf, sizeof(regAcBuf), "type='number'");
+  WiFiManagerParameter customRegEnergy("reg_energy", "Register totaal energie (input)", regEnergyBuf, sizeof(regEnergyBuf), "type='number'");
+  WiFiManagerParameter customRegLimit("reg_limit", "Register vermogenslimiet (holding)", regLimitBuf, sizeof(regLimitBuf), "type='number'");
+
   wm.addParameter(&customSmaIp);
+  wm.addParameter(&customPort);
+  wm.addParameter(&customUnit);
+  wm.addParameter(&customRegAc);
+  wm.addParameter(&customRegEnergy);
+  wm.addParameter(&customRegLimit);
 
   g_apName = "SMA-Setup-" + String((uint32_t)(ESP.getEfuseMac() & 0xFFFFFF), HEX);
   wm.setAPCallback(apCallback);
@@ -374,6 +380,11 @@ void runCaptivePortal() {
 
   strncpy(settings.smaIp, customSmaIp.getValue(), sizeof(settings.smaIp) - 1);
   settings.smaIp[sizeof(settings.smaIp) - 1] = '\0';
+  settings.smaPort = (uint16_t)parseU32(customPort.getValue(), settings.smaPort);
+  settings.smaUnitId = (uint8_t)parseU32(customUnit.getValue(), settings.smaUnitId);
+  settings.regAcPower = parseU32(customRegAc.getValue(), settings.regAcPower);
+  settings.regEnergyTotal = parseU32(customRegEnergy.getValue(), settings.regEnergyTotal);
+  settings.regPowerLimit = parseU32(customRegLimit.getValue(), settings.regPowerLimit);
   saveSettings();
 }
 
@@ -381,12 +392,10 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  Wire.begin(OLED_SDA, OLED_SCL);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("OLED: init failed"));
-  }
-  display.clearDisplay();
-  display.display();
+  Wire.begin(LCD_SDA, LCD_SCL);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
 
   analogReadResolution(12);
   pinMode(WIFI_RESET_BUTTON_PIN, INPUT_PULLUP);
