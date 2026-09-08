@@ -493,6 +493,11 @@ void setup() {
 
   runCaptivePortal();
 
+  // ESP32's default WiFi power-save (modem sleep) causes very flaky,
+  // dropout-prone STA connections with some routers (Ziggo modems
+  // among them). Disable it once connected.
+  WiFi.setSleep(false);
+
   String hostname = "sma-ctrl-" + String((uint32_t)(ESP.getEfuseMac() & 0xFFF), HEX);
   MDNS.begin(hostname.c_str());
   MDNS.addService("http", "tcp", 80);
@@ -505,6 +510,7 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiTryMs >= WIFI_RETRY_INTERVAL_MS) {
     lastWifiTryMs = millis();
     WiFi.reconnect();
+    WiFi.setSleep(false);
   }
 
   currentPotPercent = readPotPercent();
